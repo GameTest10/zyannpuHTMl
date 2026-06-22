@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>グラビティ・ラン：10000mクリア版</title>
+    <style>
+        body {
+            margin: 0; background-color: #0d0e15; color: #fff; font-family: sans-serif;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            min-height: 100vh; overflow: hidden; user-select: none;
+        }
+        canvas { background-color: #141622; border: 3px solid #323856; border-radius: 12px; transition: border-color 0.5s; }
+        #menu, #gameoverScreen {
+            position: absolute; background: rgba(13, 14, 21, 0.95); width: 850px; height: 440px;
+            border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10;
+        }
+        #gameoverScreen { display: none; }
+        h1 { color: #00ffcc; margin-bottom: 10px; font-size: 36px; }
+        .btn-group { margin: 15px 0; }
+        button {
+            background: #25293e; border: 2px solid #474f75; color: #fff; padding: 10px 20px;
+            font-size: 16px; font-weight: bold; border-radius: 6px; cursor: pointer; margin: 0 5px;
+        }
+        button:hover, button.active { background: #00ffcc; color: #0d0e15; border-color: #00ffcc; }
+        button.active { background: #ff007f; color: #fff; border-color: #ff007f; }
+    </style>
+</head>
+<body>
+
+    <div style="position: relative;">
+        <div id="menu">
+            <h1>GRAVITY RUN: GOAL 10000m</h1>
+            <div class="btn-group">
+                <button id="btn1P" class="active">1人プレイ</button>
+                <button id="btnVS">CPU対戦モード</button>
+            </div>
+            <div id="cpuDifficulty" class="btn-group" style="visibility: hidden;">
+                <span style="color:#8f9cae; margin-right:10px;">CPU強さ:</span>
+                <button id="diffEasy" class="active">弱い</button>
+                <button id="diffNormal">普通</button>
+                <button id="diffHard">強い</button>
+            </div>
+            <button id="btnStart" style="margin-top: 20px; padding: 12px 40px; font-size: 20px; background: #00ffcc; color: #0d0e15;">ゲームスタート</button>
+        </div>
+
+        <div id="gameoverScreen">
+            <h1 id="goTitle" style="color: #ff3b30;">GAME OVER</h1>
+            <h2 id="goResult" style="margin: 10px 0;">SCORE: 0m</h2>
+            <button id="btnRestart" style="margin-top: 20px;">タイトルへ戻る</button>
+        </div>
+
+        <canvas id="gameCanvas" width="850" height="440"></canvas>
+    </div>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+const CEILING_Y = 60, FLOOR_Y = 380, PLAYER_X = 120, PLAYER_SIZE = 24, CENTER_Y = 220;
+
+let gameMode = "1P", cpuLevel = "easy", gameStarted = false, score = 0, gameOver = false, gameSpeed = 6, spawnTimer = 0, animationId = null;
+let highScore = parseInt(localStorage.getItem("gravity_autosave_best")) || 0;
+let obstacles = [], particles = [], stars = [];
+
+// ステージ管理 (0: ステージ1, 1: ステージ2, 2: ステージ3)
+let currentStage = 0; 
+let announceTimer = 0;
+let gameCleared = false; // クリアフラグ
+
+const player = { y: 356, vy: 0, gravity: 0.65, isUpsideDown: false, color: "#00ffcc", trail: [], isDead: false };
+const cpu = { y: 356, vy: 0, gravity: 0.65, isUpsideDown: false, color: "#ffcc00", trail: [], isDead: false, scanTimer: 0 };
+document.getElementById("btn1P").onclick = () => { gameMode = "1P"; document.getElementById("btn1P").className = "active"; document.getElementById("btnVS").className = ""; document.getElementById("cpuDifficulty").style.visibility = "hidden"; };
+document.getElementById("btnVS").onclick = () => { gameMode = "VS"; document.getElementById("btnVS").className = "active"; document.getElementById("btn1P").className = ""; document.getElementById("cpuDifficulty").style.visibility = "visible"; };
+document.getElementById("diffEasy").onclick = () => { cpuLevel = "easy"; resetDiffClass("diffEasy"); };
+document.getElementById("diffNormal").onclick = () => { cpuLevel = "normal"; resetDiffClass("diffNormal"); };
+document.getElementById("diffHard").onclick = () => { cpuLevel = "hard"; resetDiffClass("diffHard"); };
+function resetDiffClass(id) { ["diffEasy", "diffNormal", "diffHard"].forEach(d => document.getElementById(d).className = (d===id)?"active":""); }
+
+document.getElementById("btnStart").onclick = () => { document.getElementById("menu").style.display = "none"; initGame(); };
+document.getElementById("btnRestart").onclick = () => { 
+    if (animationId) cancelAnimationFrame(animationId);
+    gameStarted = false; gameOver = false; gameCleared = false; obstacles = []; particles = [];
+    document.getElementById("gameoverScreen").style.display = "none"; 
+    document.getElementById("menu").style.display = "flex"; 
+};
+
+for (let i = 0; i < 30; i++) stars.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, size: Math.random() * 2 + 1, speed: Math.random() * 0.8 + 0.2 });
+
+window.addEventListener("keydown", (e) => { if(e.code === 'Space') { e.preventDefault(); flipPlayer(); } });
+window.addEventListener("pointerdown", (e) => { if(gameStarted && !gameOver) flipPlayer(); });
+
+function flipPlayer() {
+    if (!gameStarted || gameOver || player.isDead) return;
+    player.isUpsideDown = !player.isUpsideDown;
+    createParticles(PLAYER_X + 12, player.y + 12, player.color, 6);
+}
+
+function createParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+        particles.push({ x: x, y: y, vx: (Math.random() - 0.5) * 5 - gameSpeed * 0.2, vy: (Math.random() - 0.5) * 5, radius: Math.random() * 3 + 1, alpha: 1, color: color });
+    }
+}
+
+function initGame() {
+    if (animationId) cancelAnimationFrame(animationId);
+    score = 0; gameSpeed = 6; spawnTimer = 0; gameOver = false; gameStarted = true; gameCleared = false; obstacles = []; particles = [];
+    currentStage = 0; announceTimer = 120; // スタート時にも出す
+    player.y = 356; player.vy = 0; player.isUpsideDown = false; player.trail = []; player.isDead = false; player.color = "#00ffcc";
+    cpu.y = 356; cpu.vy = 0; cpu.isUpsideDown = false; cpu.trail = []; cpu.isDead = (gameMode === "1P");
+    canvas.style.borderColor = "#323856";
+    updateAndDraw();
+}
+
+function spawnEvent() {
+    const rand = Math.random();
+    let minHeight = currentStage >= 1 ? 50 : 40;
+    let barColor = currentStage === 1 ? "#ff5e00" : currentStage === 2 ? "#a056d6" : "#5856d6";
+
+    // ステージ3（4000m以降）はトゲが増えるように確率を変化
+    let spikeThreshold = currentStage === 2 ? 0.45 : 0.3;
+
+    if (rand < spikeThreshold) {
+        const isTop = Math.random() < 0.5, height = Math.floor(Math.random() * 20) + minHeight;
+        obstacles.push({ type: "spike", x: canvas.width, y: isTop ? 60 : 380 - height, width: 25, height: height, color: isTop ? "#ff3b30" : "#ffaa00" });
+    } else if (rand < 0.65) {
+        const width = Math.floor(Math.random() * 250) + 300, height = 16;
+        obstacles.push({ type: "block", x: canvas.width, y: 220 - height / 2, width: width, height: height, color: barColor });
+        if (Math.random() < 0.7) obstacles.push({ type: "spike", x: canvas.width + width/2, y: Math.random() < 0.5 ? 60 : 335, width: 25, height: 45, color: "#ff3b30" });
+    } else {
+        const isTopHole = Math.random() < 0.5, width = Math.floor(Math.random() * 80) + 140; 
+        obstacles.push({ type: "hole", x: canvas.width, y: isTopHole ? 0 : 380, width: width, height: 60, isTopHole: isTopHole });
+    }
+}
+function thinkCPU() {
+    if (cpu.isDead) return;
+    cpu.scanTimer++;
+    if (cpu.scanTimer % (cpuLevel === "hard" ? 1 : cpuLevel === "normal" ? 5 : 12) !== 0) return;
+    let dist = cpuLevel === "hard" ? 260 : cpuLevel === "normal" ? 180 : 120, danger = null;
+    for (let obs of obstacles) { if (obs.x > PLAYER_X && obs.x - PLAYER_X < dist) { danger = obs; break; } }
+    if (Math.random() < (cpuLevel === "easy" ? 0.25 : cpuLevel === "normal" ? 0.08 : 0)) return;
+    if (danger) {
+        if (danger.type === "spike") cpu.isUpsideDown = (danger.y > 220);
+        if (danger.type === "hole") cpu.isUpsideDown = !danger.isTopHole;
+    } else {
+        for (let obs of obstacles) { if (obs.type === "block" && obs.x > PLAYER_X && obs.x - PLAYER_X < 300) { if (Math.random() < 0.05) cpu.isUpsideDown = !cpu.isUpsideDown; break; } }
+    }
+}
+
+function drawHoleWarning(x, y, w, isTop) {
+    ctx.save(); ctx.fillStyle = "#ffcc00";
+    if (isTop) { ctx.fillRect(x, 0, 5, 60); ctx.fillRect(x + w - 5, 0, 5, 60); } 
+    else { ctx.fillRect(x, 380, 5, 60); ctx.fillRect(x + w - 5, 380, 5, 60); }
+    ctx.fillStyle = "#000"; let sy = isTop ? 0 : 380, ey = isTop ? 60 : 440;
+    for (let cy = sy; cy < ey; cy += 10) {
+        ctx.fillRect(x, cy, 5, 5); ctx.fillRect(x + w - 5, cy, 5, 5);
+    }
+    ctx.restore();
+}
+
+function updateAndDraw() {
+    if (!gameStarted) return;
+    animationId = requestAnimationFrame(updateAndDraw);
+
+    let bgColors = ["#141622", "#2a0d0d", "#1a0d2a"];
+    let wallColors = ["#25293e", "#5a1818", "#3f185a"];
+    let playerColors = ["#00ffcc", "#ff007f", "#bd00ff"];
+    let stageNames = ["STAGE 1: CYBER", "STAGE 2: MAGMA", "STAGE 3: CRYSTAL"];
+
+    let lastStage = currentStage;
+    // 2000mごとにステージを上げる（最高はステージ3まで）
+    if (score < 2000) currentStage = 0;
+    else if (score < 4000) currentStage = 1;
+    else currentStage = 2;
+
+    // ★10000mに到達したらクリア処理★
+    if (score >= 10000 && !gameCleared) {
+        gameCleared = true;
+        gameOver = true;
+    }
+
+    if (lastStage !== currentStage) {
+        announceTimer = 120; 
+        player.color = playerColors[currentStage];
+        canvas.style.borderColor = playerColors[currentStage];
+        createParticles(canvas.width / 2, canvas.height / 2, playerColors[currentStage], 40);
+    }
+
+    ctx.fillStyle = bgColors[currentStage]; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    stars.forEach(s => { if (!gameOver) s.x -= s.speed * (currentStage + 1); if (s.x < 0) s.x = canvas.width; ctx.fillStyle = "rgba(255,255,255,0.3)"; ctx.fillRect(s.x, s.y, s.size, s.size); });
+    ctx.fillStyle = wallColors[currentStage]; ctx.fillRect(0, 0, canvas.width, 60); ctx.fillRect(0, 380, canvas.width, 60);
+
+    if (!gameOver) {
+        score += 2; // スコア（進む距離）のスピード調整
+        
+        // 2000mごとに速度の基準（ベーススピード）を引き上げる
+        let baseSpeeds = [6, 8.5, 11];
+        gameSpeed = baseSpeeds[currentStage] + ((score % 2000) * 0.0015);
+
+        spawnTimer++; if (spawnTimer > Math.max(20, 95 - gameSpeed * 4)) { spawnEvent(); spawnTimer = 0; }
+        if (!player.isDead) { player.vy += player.gravity * (player.isUpsideDown ? -1 : 1); player.y += player.vy; player.trail.push({x: PLAYER_X, y: player.y}); if (player.trail.length > 5) player.trail.shift(); }
+        if (!cpu.isDead) { thinkCPU(); cpu.vy += cpu.gravity * (cpu.isUpsideDown ? -1 : 1); cpu.y += cpu.vy; cpu.trail.push({x: PLAYER_X - 30, y: cpu.y}); if (cpu.trail.length > 5) cpu.trail.shift(); }
+    }
+
+    let pHole = false, cHole = false;
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+        const obs = obstacles[i]; if (!gameOver) obs.x -= gameSpeed;
+        if (obs.type === "hole") {
+            ctx.fillStyle = bgColors[currentStage];
+            if (obs.isTopHole) { ctx.fillRect(obs.x, 0, obs.width, 60); drawHoleWarning(obs.x, 0, obs.width, true); } 
+            else { ctx.fillRect(obs.x, 380, obs.width, 60); drawHoleWarning(obs.x, 380, obs.width, false); }
+            if (!player.isDead && PLAYER_X + 24 > obs.x && PLAYER_X < obs.x + obs.width) pHole = (obs.isTopHole ? player.y <= 60 : player.y >= 356);
+            if (!cpu.isDead && PLAYER_X - 6 > obs.x && PLAYER_X - 30 < obs.x + obs.width) cHole = (obs.isTopHole ? cpu.y <= 60 : cpu.y >= 356);
+        } else if (obs.type === "block") {
+            ctx.fillStyle = obs.color; ctx.fillRect(obs.x, obs.y, obs.width, obs.height);
+            if (!player.isDead && PLAYER_X + 24 > obs.x && PLAYER_X < obs.x + obs.width) {
+                if (!player.isUpsideDown && player.y + 24 >= obs.y && player.y + 24 <= obs.y + 12 && player.vy >= 0) { player.y = obs.y - 24; player.vy = 0; } 
+                else if (player.y <= obs.y + obs.height && player.y >= obs.y + obs.height - 14 && player.vy <= 0) { player.y = obs.y + obs.height; player.vy = 0; }
+            }
+            if (!cpu.isDead && PLAYER_X - 6 > obs.x && PLAYER_X - 30 < obs.x + obs.width) {
+                if (!cpu.isUpsideDown && cpu.y + 24 >= obs.y && cpu.y + 24 <= obs.y + 12 && cpu.vy >= 0) { cpu.y = obs.y - 24; cpu.vy = 0; } 
+                else if (cpu.y <= obs.y + obs.height && cpu.y >= obs.y + obs.height - 14 && cpu.vy <= 0) { cpu.y = obs.y + obs.height; cpu.vy = 0; }
+            }
+        } else if (obs.type === "spike") {
+            ctx.fillStyle = obs.color; ctx.fillRect(obs.x, obs.y, obs.width, obs.height);
+            if (!player.isDead && PLAYER_X < obs.x + obs.width && PLAYER_X + 24 > obs.x && player.y < obs.y + obs.height && player.y + 24 > obs.y) { player.isDead = true; createParticles(PLAYER_X, player.y, player.color, 15); }
+            if (!cpu.isDead && PLAYER_X - 30 < obs.x + obs.width && PLAYER_X - 6 > obs.x && cpu.y < obs.y + obs.height && cpu.y + 24 > obs.y) { cpu.isDead = true; createParticles(PLAYER_X - 30, cpu.y, cpu.color, 15); }
+        }
+    }
+    obstacles = obstacles.filter(obs => obs.x + 500 > 0);
+
+    if (!player.isDead) { if (!pHole) { if (player.y > 356) { player.y = 356; player.vy = 0; } if (player.y < 60) { player.y = 60; player.vy = 0; } } else if (player.y > 440 || player.y + 24 < 0) { player.isDead = true; createParticles(PLAYER_X, player.y, player.color, 15); } }
+    if (!cpu.isDead) { if (!cHole) { if (cpu.y > 356) { cpu.y = 356; cpu.vy = 0; } if (cpu.y < 60) { cpu.y = 60; cpu.vy = 0; } } else if (cpu.y > 440 || cpu.y + 24 < 0) { cpu.isDead = true; createParticles(PLAYER_X - 30, cpu.y, cpu.color, 15); } }
+
+    if (gameMode === "1P" && player.isDead) gameOver = true;
+    else if (gameMode === "VS" && (player.isDead || cpu.isDead)) gameOver = true;
+
+    if (!player.isDead) {
+        player.trail.forEach((t, idx) => { ctx.fillStyle = player.color; ctx.globalAlpha = (idx / player.trail.length) * 0.25; ctx.fillRect(t.x, t.y, 24, 24); });
+        ctx.globalAlpha = 1; ctx.fillStyle = player.color; ctx.fillRect(PLAYER_X, player.y, 24, 24);
+    }
+    if (!cpu.isDead) {
+        cpu.trail.forEach((t, idx) => { ctx.fillStyle = cpu.color; ctx.globalAlpha = (idx / cpu.trail.length) * 0.25; ctx.fillRect(t.x, t.y, 24, 24); });
+        ctx.globalAlpha = 1; ctx.fillStyle = cpu.color; ctx.fillRect(PLAYER_X - 30, cpu.y, 24, 24);
+    }
+    particles.forEach((p, i) => { p.x += p.vx; p.y += p.vy; p.alpha -= 0.02; if (p.alpha <= 0) particles.splice(i, 1); ctx.save(); ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI*2); ctx.fill(); ctx.restore(); });
+
+    ctx.fillStyle = "#fff"; ctx.font = "bold 15px monospace"; if (score % 20 < 10 && currentStage > 0) ctx.fillStyle = playerColors[currentStage];
+    ctx.fillText(`SCORE: ${Math.min(score, 10000)}m / 10000m`, 25, 36); ctx.fillStyle = "#fff"; ctx.textAlign = "right";
+    ctx.fillText(gameMode==="VS" ? `MODE: VS CPU` : `BEST: ${highScore}m`, canvas.width - 25, 36); ctx.textAlign = "left";
+
+    if (announceTimer > 0) {
+        announceTimer--;
+        ctx.fillStyle = playerColors[currentStage]; ctx.font = "bold 32px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(stageNames[currentStage], canvas.width / 2, 160);
+        ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+        ctx.fillText(`SPEED & DIFFICULTY UP !!`, canvas.width / 2, 200); ctx.textAlign = "left";
+    }
+
+    if (gameOver) {
+        let t = "GAME OVER", r = `スコア: ${score}m`;
+        
+        // ★ゲームクリア時の表示分岐★
+        if (gameCleared) {
+            t = "GAME CLEAR !!";
+            r = gameMode === "VS" && !player.isDead ? "CPUに勝利し、10000m完走しました！" : "おめでとうございます！10000m完走達成！";
+        } else if (gameMode === "VS") { 
+            if (!player.isDead && cpu.isDead) { t = "YOU WIN !!"; r = "CPUが脱落！あなたの勝利です！"; } 
+            else if (player.isDead && !cpu.isDead) { t = "YOU LOSE..."; r = "あなたが先に脱落しました。"; } 
+            else { t = "DRAW"; r = "同時にクラッシュしました！"; } 
+        } else { 
+            if (score > highScore) { highScore = score; localStorage.setItem("gravity_autosave_best", highScore); } 
+        }
+        
+        document.getElementById("goTitle").innerText = t; 
+        document.getElementById("goTitle").style.color = t.includes("CLEAR") || t.includes("WIN") ? "#00ffcc" : "#ff3b30";
+        document.getElementById("goResult").innerText = r; document.getElementById("gameoverScreen").style.display = "flex"; 
+        return;
+    }
+}
+</script>
+</body>
+</html>
